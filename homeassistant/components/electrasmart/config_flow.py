@@ -1,5 +1,6 @@
 """Config flow for Electra Air Conditioner integration."""
 
+from collections.abc import Mapping
 import logging
 from typing import Any, override
 
@@ -7,7 +8,7 @@ from electrasmart.api import STATUS_SUCCESS, Attributes, ElectraAPI, ElectraApiE
 from electrasmart.api.utils import generate_imei
 import probatio
 
-from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
+from homeassistant.config_entries import SOURCE_REAUTH, ConfigFlow, ConfigFlowResult
 from homeassistant.const import CONF_TOKEN
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
@@ -29,6 +30,7 @@ class ElectraSmartConfigFlow(ConfigFlow, domain=DOMAIN):
         self._imei: str | None = None
         self._token: str | None = None
         self._api: ElectraAPI | None = None
+        self._otp_step_id: str = CONF_OTP
 
     @override
     async def async_step_user(
@@ -120,7 +122,7 @@ class ElectraSmartConfigFlow(ConfigFlow, domain=DOMAIN):
         except ElectraApiError as exp:
             _LOGGER.error("Failed to connect to API: %s", exp)
             return self._show_setup_form(
-                user_input, {"base": "cannot_connect"}, CONF_OTP
+                user_input, {"base": "cannot_connect"}, self._otp_step_id
             )
 
         if resp[Attributes.DATA][Attributes.RES] == STATUS_SUCCESS:
@@ -131,8 +133,46 @@ class ElectraSmartConfigFlow(ConfigFlow, domain=DOMAIN):
                 CONF_IMEI: self._imei,
                 CONF_PHONE_NUMBER: self._phone_number,
             }
+            if self.source == SOURCE_REAUTH:
+                return self.async_update_reload_and_abort(
+                    self._get_reauth_entry(), data=data
+                )
             return self.async_create_entry(title=self._phone_number, data=data)
-        return self._show_setup_form(user_input, {CONF_OTP: "invalid_auth"}, CONF_OTP)
+        return self._show_setup_form(
+            user_input, {CONF_OTP: "invalid_auth"}, self._otp_step_id
+        )
+
+    async def async_step_reauth(
+        self, entry_data: Mapping[str, Any]
+    ) -> ConfigFlowResult:
+        """Handle a reauthentication, which is what clears an account lockout."""
+        self._phone_number = entry_data[CONF_PHONE_NUMBER]
+        self._imei = entry_data[CONF_IMEI]
+        self._otp_step_id = "reauth_confirm"
+        return await self.async_step_reauth_confirm()
+
+    async def async_step_reauth_confirm(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Send a one-time password for the configured phone number."""
+        if self._api is None:
+            self._api = ElectraAPI(async_get_clientsession(self.hass))
+
+        if user_input is not None:
+            return await self._validate_one_time_password(user_input)
+
+        errors: dict[str, str] = {}
+        assert isinstance(self._api, ElectraAPI)
+        assert isinstance(self._phone_number, str)
+        assert isinstance(self._imei, str)
+
+        try:
+            await self._api.generate_new_token(self._phone_number, self._imei)
+        except ElectraApiError as exp:
+            _LOGGER.error("Failed to connect to API: %s", exp)
+            errors["base"] = "cannot_connect"
+
+        return self._show_setup_form(None, errors, self._otp_step_id)
 
     async def async_step_one_time_password(
         self,

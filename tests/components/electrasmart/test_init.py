@@ -1,11 +1,14 @@
 """Tests for the Electra Smart integration setup."""
 
+from json import loads
 from unittest.mock import AsyncMock, Mock, patch
 
+from electrasmart.api import ElectraIntruderLockoutError
 from electrasmart.device import OperationMode
 import pytest
 from syrupy.assertion import SnapshotAssertion
 
+from homeassistant import config_entries
 from homeassistant.components.electrasmart.const import (
     CONF_IMEI,
     CONF_PHONE_NUMBER,
@@ -15,7 +18,7 @@ from homeassistant.const import CONF_TOKEN
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
 
-from tests.common import MockConfigEntry
+from tests.common import MockConfigEntry, async_load_fixture
 
 
 @pytest.fixture(name="mock_device")
@@ -70,3 +73,47 @@ async def test_device_registry(
         (DOMAIN, "a8032ab12345"), entry.entry_id
     )
     assert device_entry == snapshot
+
+
+async def test_intruder_lockout_starts_a_reauth_flow(
+    hass: HomeAssistant, mock_device: Mock
+) -> None:
+    """A locked out account must ask for a sign-in instead of being retried."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id="0521234567",
+        data={
+            CONF_TOKEN: "token",
+            CONF_IMEI: "2b950000024051000000000000000000",
+            CONF_PHONE_NUMBER: "0521234567",
+        },
+    )
+    entry.add_to_hass(hass)
+
+    mock_generate_token = loads(
+        await async_load_fixture(hass, "generate_token_response.json", DOMAIN)
+    )
+    mock_api = Mock(
+        devices=[mock_device],
+        fetch_devices=AsyncMock(
+            side_effect=ElectraIntruderLockoutError("Intruder lockout")
+        ),
+    )
+    with (
+        patch(
+            "homeassistant.components.electrasmart.ElectraAPI", return_value=mock_api
+        ),
+        patch(
+            "electrasmart.api.ElectraAPI.generate_new_token",
+            return_value=mock_generate_token,
+        ),
+    ):
+        assert not await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    assert entry.state is config_entries.ConfigEntryState.SETUP_ERROR
+
+    flows = hass.config_entries.flow.async_progress()
+    assert len(flows) == 1
+    assert flows[0]["context"]["source"] == config_entries.SOURCE_REAUTH
+    assert flows[0]["step_id"] == "reauth_confirm"

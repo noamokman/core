@@ -15,6 +15,13 @@
           "one_time_password": "One-time password"
         }
       },
+      "reauth_confirm": {
+        "title": "Sign in again",
+        "description": "The Electra account is locked out, and only signing in again clears it. A one-time password was sent to the phone number this integration was set up with.",
+        "data": {
+          "one_time_password": "One-time password"
+        }
+      },
       "user": {
         "data": {
           "phone_number": "Phone number"
